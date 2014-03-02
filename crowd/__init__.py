@@ -3,8 +3,11 @@ from djblets.siteconfig.forms import SiteSettingsForm
 from djblets.siteconfig.models import SiteConfiguration
 from reviewboard.accounts.backends import AuthBackend
 from django.contrib.auth.models import User
+from reviewboard.reviews.models import Group
 import requests
 import json
+import logging
+import traceback
 
 siteconfig = SiteConfiguration.objects.get_current()
 
@@ -51,17 +54,35 @@ class CrowdAuthBackend(AuthBackend):
         user.is_staff = False
         user.is_superuser = False
         user.set_unusable_password()
-        user.save()
+	user.save()
+
+        # Add the user to whatever groups they can belong.
+        # This keeps them from seeing a blank screen when
+        # they first log in
+        for group in Group.objects.accessible(user):
+            group.users.add(user)
+
+        logging.debug("Created user %s" % username)
 
         return user
 
     def authenticate(self, username, password):
-        response = requests.post(auth_crowd_url.rstrip("/") + "/rest/usermanagement/1/authentication",
-                                 data=json.dumps({"value": password}),
-                                 params={"username": username},
-                                 auth=(auth_crowd_app, auth_crowd_pass),
-                                 headers={'Content-Type': 'application/json',
-                                          'Accept': 'application/json'})
+        username = username.strip()
+        url = "%s/%s" % (auth_crowd_url.rstrip("/").strip(), "rest/usermanagement/1/authentication")
+        logging.debug("Authenticating user %s" % username)
+        try:
+            response = requests.post(url,
+                                     data=json.dumps({"value": password}),
+                                     params={"username": username},
+                                     auth=(auth_crowd_app, auth_crowd_pass),
+                                     headers={'Content-Type': 'application/json',
+                                              'Accept': 'application/json'})
+        except:
+            logging.error("Exception occurred while authenticating user %s" % username)
+            logging.error(traceback.format_exc())
+            return None
+
+        logging.debug("Authentication returned %s" % str(response.status_code))
 
         # Authentication has failed
         if not response.ok:
@@ -72,7 +93,7 @@ class CrowdAuthBackend(AuthBackend):
         try:
             return User.objects.get(username=username)
         except User.DoesNotExist:
-            return self.details_to_user(username, json.loads(response.text))
+            return self.details_to_user(username, json.loads(response.content))
 
     def get_or_create_user(self, username):
         username = username.strip()
@@ -80,13 +101,16 @@ class CrowdAuthBackend(AuthBackend):
         try:
             user = User.objects.get(username=username)
         except User.DoesNotExist:
-            response = requests.get(auth_crowd_url.rstrip("/") + "/rest/usermanagement/1/user",
-                                     params={"username": username},
-                                     auth=(auth_crowd_app, auth_crowd_pass),
-                                     headers={'Content-Type': 'application/json',
-                                              'Accept': 'application/json'})
+            url = "%s/%s" % (auth_crowd_url.rstrip("/").strip(), "rest/usermanagement/1/user")
+            logging.debug("Querying crowd for user %s" % username)
+            response = requests.get(url,
+                                    params={"username": username},
+                                    auth=(auth_crowd_app, auth_crowd_pass),
+                                    headers={'Content-Type': 'application/json',
+                                             'Accept': 'application/json'})
+            logging.debug("User identification returned %s" % str(response.status_code))
             if response.ok:
-                return self.details_to_user(username, json.loads(response.text))
+                return self.details_to_user(username, json.loads(response.content))
             
-        return None
+        return user
 
